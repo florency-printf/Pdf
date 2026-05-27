@@ -68,6 +68,7 @@ class ExtractionResult(BaseModel):
     language: str = Field(default="unknown", description="Detected document language")
     tables: List[TableData] = []
     pages: List[PageResult] = []
+    intelligence: Optional[Dict[str, Any]] = None
     metadata: ExtractionMetadata
 
 

@@ -18,7 +18,7 @@ FIX: delete_job no longer blocks for asyncio.sleep(2) after revoking Celery task
 
 import json
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -292,6 +292,49 @@ async def get_tables_only(request: Request, job_id: str):
         )
     tables = data.get("tables", [])
     return [TableData(**t) for t in tables]
+
+
+@router.get(
+    "/extract/{job_id}/intelligence",
+    summary="Get Gujarati intelligence extraction (Stages 5-9)",
+)
+@limiter.limit(settings.RATE_LIMIT_EXTRACT)
+async def get_intelligence(request: Request, job_id: str, question: Optional[str] = None):
+    """
+    Return structured Gujarati intelligence data for a completed job.
+
+    Optional query parameter `question` triggers targeted Q&A.
+    Examples:
+      GET /api/v1/extract/{job_id}/intelligence
+      GET /api/v1/extract/{job_id}/intelligence?question=What+is+the+survey+number
+    """
+    status, _, _, data = _resolve_job_status(job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if status == RESULT_EXPIRED:
+        raise HTTPException(status_code=410, detail="Result expired.")
+    if status != STATE_DONE:
+        return JSONResponse(
+            status_code=202,
+            content={"status": status, "message": "Still processing."},
+        )
+
+    intelligence = data.get("intelligence")
+    if not intelligence:
+        raise HTTPException(
+            status_code=404,
+            detail="Intelligence data not available for this job. Re-upload to enable.",
+        )
+
+    if question:
+        return {
+            "job_id": job_id,
+            "question": question,
+            "standard_answers": intelligence.get("standard_answers", []),
+            "note": "For real-time Q&A, re-upload document and query /intelligence?question=...",
+        }
+
+    return {"job_id": job_id, **intelligence}
 
 
 async def delete_job(job_id: str):
