@@ -54,6 +54,11 @@ from app.services.pdf_detector import DocumentClassification, detect_pdf_type_fr
 from app.services.table_extractor import extract_tables_digital_batch
 from app.services.validator import validate_extraction_result
 from app.utils.gujarati_font_repair import repair_fitz_page_text
+from app.utils.gujarati_text_intelligence import (
+    correct_gujarati_text,
+    extract_structured_fields,
+    validate_structured_fields,
+)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -359,7 +364,7 @@ def run_extraction_pipeline(
     page_texts = [page.get("text", "") for page in all_page_results]
     cleaned_texts = clean_pages(page_texts)
     for idx, cleaned in enumerate(cleaned_texts):
-        all_page_results[idx]["text"] = cleaned
+        all_page_results[idx]["text"] = correct_gujarati_text(cleaned)
 
     all_tables: List[Dict] = []
     for page in all_page_results:
@@ -395,6 +400,10 @@ def run_extraction_pipeline(
         if p.get("text", "").strip()
     )
     full_text = clean_text_block(full_text)
+    full_text = correct_gujarati_text(full_text)
+    structured_data = extract_structured_fields(full_text)
+    structured_issues = validate_structured_fields(structured_data)
+    warnings.extend(f"Structured extraction: {issue}" for issue in structured_issues)
 
     page_models: List[PageResult] = [
         _build_page_result(
@@ -446,6 +455,7 @@ def run_extraction_pipeline(
         status=STATE_DONE,
         text=full_text,
         full_text=full_text,
+        structured_data=structured_data,
         confidence=metadata.confidence_score,
         language=(
             "gujarati"

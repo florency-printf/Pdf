@@ -58,6 +58,10 @@ class ExtractionResult(BaseModel):
     status: str = Field(..., description="'done', 'processing', 'failed'")
     text: str = Field(default="", description="Full merged clean text")
     full_text: str = Field(default="", description="Alias for full merged clean text")
+    structured_data: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Structured fields extracted from the document text",
+    )
     confidence: float = Field(
         default=0.0, ge=0.0, le=1.0, description="Overall extraction confidence"
     )
