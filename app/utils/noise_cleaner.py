@@ -30,6 +30,7 @@ from difflib import SequenceMatcher
 from typing import Deque, List, Set, Tuple
 
 from app.config.constants import NOISE_PATTERNS
+from app.utils.gujarati_font_repair import repair_extracted_text
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -187,12 +188,13 @@ def clean_pages(page_texts: List[str]) -> List[str]:
         return []
 
     if len(page_texts) < 2:
-        return [clean_text_block(text) for text in page_texts]
+        return [clean_text_block(repair_extracted_text(text)) for text in page_texts]
 
     line_counts: Counter[str] = Counter()
     page_lines: List[List[str]] = []
 
     for page_text in page_texts:
+        page_text = repair_extracted_text(page_text)
         seen_in_page: Set[str] = set()
         normalized_lines: List[str] = []
         for line in page_text.splitlines():

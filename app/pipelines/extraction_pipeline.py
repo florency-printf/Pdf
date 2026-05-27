@@ -30,6 +30,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict, List, Optional
 
+import fitz
+
 from app.config.constants import (
     PDF_TYPE_DIGITAL,
     PDF_TYPE_SCANNED,
@@ -51,6 +53,7 @@ from app.services.pdf_detector import DocumentClassification, detect_pdf_type_fr
 # FIX: import the new batch function instead of per-page extract_tables_digital
 from app.services.table_extractor import extract_tables_digital_batch
 from app.services.validator import validate_extraction_result
+from app.utils.gujarati_font_repair import repair_fitz_page_text
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -333,6 +336,19 @@ def run_extraction_pipeline(
         scanned_results = _process_scanned_pages(
             pdf_path, doc_classification, progress_callback, pdf_bytes
         )
+
+    if digital_results:
+        fitz_doc = None
+        try:
+            fitz_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            for page_info in digital_results:
+                page_number = page_info.get("page_number", 0)
+                if page_number < 1 or page_number > len(fitz_doc):
+                    continue
+                page_info["text"] = repair_fitz_page_text(fitz_doc[page_number - 1])
+        finally:
+            if fitz_doc is not None:
+                fitz_doc.close()
 
     all_page_results: List[Dict] = sorted(
         digital_results + scanned_results,
