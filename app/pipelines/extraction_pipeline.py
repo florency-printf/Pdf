@@ -54,7 +54,7 @@ from app.services.pdf_detector import DocumentClassification, detect_pdf_type_fr
 from app.services.table_extractor import extract_tables_digital_batch
 from app.services.validator import validate_extraction_result
 from app.utils.gujarati_font_repair import repair_fitz_page_text
-from app.utils.gujarati_text_intelligence import (
+from app.utils.gujarati_intelligence import (
     correct_gujarati_text,
     extract_structured_fields,
     validate_structured_fields,
@@ -62,21 +62,6 @@ from app.utils.gujarati_text_intelligence import (
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-try:
-    from app.utils.gujarati_intelligence import (
-        IntelligenceResult,
-        run_intelligence_pipeline,
-    )
-
-    _INTELLIGENCE_AVAILABLE = True
-except Exception:
-    IntelligenceResult = Any  # type: ignore[assignment]
-    run_intelligence_pipeline = None  # type: ignore[assignment]
-    _INTELLIGENCE_AVAILABLE = False
-    logger.warning(
-        "Gujarati intelligence pipeline not available - running without Stages 5-9"
-    )
 
 
 def _resolve_scanned_ocr_language() -> str:
@@ -375,38 +360,11 @@ def run_extraction_pipeline(
         key=lambda p: p.get("page_number", 0),
     )
 
-    logger.info("[%s] Step 3: Noise removal + Gujarati Intelligence (Stages 5-9)", job_id)
+    logger.info("[%s] Step 3: Noise removal", job_id)
     page_texts = [page.get("text", "") for page in all_page_results]
     cleaned_texts = clean_pages(page_texts)
     for idx, cleaned in enumerate(cleaned_texts):
         all_page_results[idx]["text"] = correct_gujarati_text(cleaned)
-
-    intelligence_result: Optional[IntelligenceResult] = None
-    if _INTELLIGENCE_AVAILABLE:
-        try:
-            intelligence_result = run_intelligence_pipeline(
-                page_texts=cleaned_texts,
-                apply_fuzzy_correction=True,
-            )
-            corrected_pages_text = intelligence_result.corrected_text.split("\n\n")
-            for idx, corrected in enumerate(corrected_pages_text):
-                if idx < len(all_page_results) and corrected.strip():
-                    all_page_results[idx]["text"] = corrected
-
-            logger.info(
-                "[%s] Intelligence: type=%s | fields=%d | confidence=%.2f",
-                job_id,
-                intelligence_result.parsed_document.document_type.value,
-                len(intelligence_result.parsed_document.fields),
-                intelligence_result.validation_report.validated_confidence,
-            )
-        except Exception as exc:
-            intelligence_result = None
-            logger.warning(
-                "[%s] Intelligence pipeline failed (non-fatal): %s",
-                job_id,
-                exc,
-            )
 
     all_tables: List[Dict] = []
     for page in all_page_results:
@@ -507,9 +465,6 @@ def run_extraction_pipeline(
         ),
         tables=table_models,
         pages=page_models,
-        intelligence=(
-            intelligence_result.to_dict() if intelligence_result is not None else None
-        ),
         metadata=metadata,
     )
 
@@ -525,24 +480,13 @@ def run_extraction_pipeline(
     return result
 
 
-def save_result_to_disk(
-    result: ExtractionResult,
-    output_path: Path,
-    intelligence_result=None,
-) -> None:
+def save_result_to_disk(result: ExtractionResult, output_path: Path) -> None:
     """Persist extraction result as JSON to disk."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = result.model_dump()
     payload["expires_at"] = (
         datetime.now(timezone.utc) + timedelta(seconds=settings.RESULT_EXPIRES_SECONDS)
     ).isoformat()
-    if intelligence_result is None:
-        intelligence_result = getattr(result, "intelligence", None)
-    if intelligence_result is not None:
-        if hasattr(intelligence_result, "to_dict"):
-            payload["intelligence"] = intelligence_result.to_dict()
-        else:
-            payload["intelligence"] = intelligence_result
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
