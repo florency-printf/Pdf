@@ -39,6 +39,7 @@ FIXES IN THIS VERSION:
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import time
@@ -66,8 +67,8 @@ _TESSERACT_CHECK_LOCK = Lock()
 _WINDOWS_TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 _WINDOWS_TESSDATA_PREFIX = r"C:\Program Files\Tesseract-OCR\tessdata"
 
-_PRIMARY_PSM = 6
-_RETRY_PSM = 11
+_PRIMARY_PSM = 3
+_RETRY_PSM = 6
 _TARGET_CONFIDENCE = 0.6
 # FIX 3: lowered from 0.35 — Gujarati scores 0.15–0.40 on clean scans
 _LOW_CONFIDENCE_WARNING = 0.25
@@ -280,6 +281,9 @@ def _score_result(text: str, confidence: float) -> float:
     if not text.strip():
         return 0.0
 
+    import unicodedata
+
+    text = unicodedata.normalize("NFKC", text)
     chars = [c for c in text if not c.isspace()]
     if not chars:
         return 0.0
@@ -517,7 +521,8 @@ def extract_gujarati_pdf(
     """
     Extract Gujarati OCR page results in parallel.
 
-    FIX 2: DPI is no longer forced to max(300, dpi, settings.OCR_DPI).
+    FIX 2: DPI is no longer forced to a 300 floor. The caller-provided DPI is
+           preserved with only a small safety minimum for Gujarati clarity.
     The pipeline calls effective_ocr_dpi() which already accounts for page count
     and document length. Overriding it here caused unnecessary slowdowns.
     We now use the passed-in dpi directly, with a safe minimum of 150 DPI
@@ -543,56 +548,65 @@ def extract_gujarati_pdf(
     except Exception as exc:
         raise ValueError(f"Cannot open PDF: {exc}") from exc
 
-    try:
-        total = len(doc)
-        targets = page_numbers or list(range(1, total + 1))
-        targets = [p for p in targets if 1 <= p <= total]
-        rendered_pages = [
-            (page_num, _render_page_to_pil(doc[page_num - 1], dpi=effective_dpi))
-            for page_num in targets
-        ]
-    finally:
-        doc.close()
-
+    total = len(doc)
+    targets = page_numbers or list(range(1, total + 1))
+    targets = [p for p in targets if 1 <= p <= total]
     if not targets:
+        doc.close()
         return []
 
-    workers = min(_parallel_workers(), len(targets))
+    batch_size = min(8, len(targets))
+    workers = min(_parallel_workers(), batch_size)
     logger.info(
-        "Gujarati OCR batch | file=%s | pages=%s | workers=%s | dpi=%s",
+        "Gujarati OCR batch | file=%s | pages=%s | workers=%s | dpi=%s | batch=%s",
         pdf_path.name,
         len(targets),
         workers,
         effective_dpi,
+        batch_size,
     )
 
     results: List[Dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(
-                _process_rendered_page, image, page_num, effective_dpi
-            ): page_num
-            for page_num, image in rendered_pages
-        }
-        for future in as_completed(futures):
-            page_num = futures[future]
-            try:
-                results.append(future.result())
-            except Exception as exc:
-                logger.warning(
-                    "Gujarati OCR page failed | page=%s | error=%s",
-                    page_num,
-                    exc,
-                )
-                results.append(
-                    {
-                        "page_number": page_num,
-                        "text": "",
-                        "confidence": 0.0,
-                        "warnings": [f"OCR failed: {exc}"],
-                        "tables": [],
-                    }
-                )
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for batch_start in range(0, len(targets), batch_size):
+                batch_targets = targets[batch_start : batch_start + batch_size]
+                batch_images = [
+                    (
+                        page_num,
+                        _render_page_to_pil(doc[page_num - 1], dpi=effective_dpi),
+                    )
+                    for page_num in batch_targets
+                ]
+                futures = {
+                    executor.submit(
+                        _process_rendered_page, image, page_num, effective_dpi
+                    ): page_num
+                    for page_num, image in batch_images
+                }
+                for future in as_completed(futures):
+                    page_num = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        logger.warning(
+                            "Gujarati OCR page failed | page=%s | error=%s",
+                            page_num,
+                            exc,
+                        )
+                        results.append(
+                            {
+                                "page_number": page_num,
+                                "text": "",
+                                "confidence": 0.0,
+                                "warnings": [f"OCR failed: {exc}"],
+                                "tables": [],
+                            }
+                        )
+                del batch_images
+                gc.collect()
+    finally:
+        doc.close()
 
     results.sort(key=lambda r: r["page_number"])
     logger.info(

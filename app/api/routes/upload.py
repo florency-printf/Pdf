@@ -4,18 +4,9 @@ POST /api/v1/upload
   - Validates and stream-saves the PDF
   - Enqueues a Celery extraction task (or runs inline if Celery unavailable)
   - Returns job_id for polling
-
-Rate-limited to prevent abuse.
-
-FIX: Now imports the shared Limiter instance from app.api.limiter instead of
-creating its own. Previously each route module had its own Limiter(), which
-meant rate-limit counters were NOT shared between upload and extract buckets.
-
-FIX: Dedup block now validates that the cached result has not expired before
-reusing it. Previously, an expired cached result would be returned as the
-job_id, causing the client to immediately get a 410 Gone response.
 """
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -29,11 +20,11 @@ from fastapi import (
     UploadFile,
 )
 
-from app.api.limiter import limiter  # FIX: shared limiter
-from app.config.settings import settings
+from app.api.limiter import limiter
 from app.api.security import require_api_key
+from app.config.settings import settings
 from app.models.response_model import ErrorResponse, UploadResponse
-from app.utils.file_handler import save_upload_streaming, find_job_id_by_hash
+from app.utils.file_handler import find_job_id_by_hash, save_upload_streaming
 from app.utils.logger import get_logger
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -41,10 +32,7 @@ logger = get_logger(__name__)
 
 
 def _enqueue_or_run(job_id: str, background_tasks: BackgroundTasks) -> None:
-    """
-    Try to enqueue a Celery task.
-    If Celery/Redis is unavailable, fall back to FastAPI BackgroundTasks.
-    """
+    """Try Celery first, then fall back to FastAPI BackgroundTasks."""
     if settings.is_testing:
         _run_inline(job_id)
         return
@@ -62,10 +50,7 @@ def _enqueue_or_run(job_id: str, background_tasks: BackgroundTasks) -> None:
 
 
 def _run_inline(job_id: str) -> None:
-    """
-    Inline (non-Celery) extraction — used when Redis is not available.
-    Runs in a FastAPI background thread.
-    """
+    """Inline extraction fallback used when Celery/Redis is unavailable."""
     from app.pipelines.extraction_pipeline import (
         run_extraction_pipeline,
         save_result_to_disk,
@@ -110,7 +95,7 @@ def _is_cached_result_valid(existing_job_id: str) -> bool:
     Check whether a cached extraction result exists and has not expired.
     Returns True only if the output file exists and its expires_at is in the future.
     """
-    from app.utils.file_handler import get_output_path, cleanup_job_files
+    from app.utils.file_handler import cleanup_job_files, get_output_path
 
     cached_output = get_output_path(existing_job_id)
     if not cached_output.exists():
@@ -121,7 +106,6 @@ def _is_cached_result_valid(existing_job_id: str) -> bool:
             cached_data = json.load(f)
         expires_at = cached_data.get("expires_at")
         if not expires_at:
-            # No expiry field — treat as expired to be safe
             return False
         expiry_dt = datetime.fromisoformat(expires_at)
         if expiry_dt.tzinfo is None:
@@ -150,41 +134,49 @@ async def upload_pdf(
         description="PDF file to extract. Max size controlled by MAX_FILE_SIZE_MB env var.",
     ),
 ):
-    """
-    Stream-upload a PDF and queue it for extraction.
+    """Stream-upload a PDF and queue it for extraction."""
+    job_id, _saved_path, size_bytes = await save_upload_streaming(file)
 
-    - Supports files up to `MAX_FILE_SIZE_MB` (default 100 MB).
-    - Returns a `job_id` — use it to poll `GET /api/v1/extract/{job_id}`.
-    - Processing is async (Celery) or background (FastAPI fallback).
-    """
-    job_id, saved_path, size_bytes = await save_upload_streaming(file)
-
-    # ── Dedup by SHA-256 — reuse existing completed result ─────────────────
-    from app.utils.file_handler import get_upload_hash_path, cleanup_job_files
+    from app.utils.file_handler import cleanup_job_files, get_upload_hash_path
 
     hash_path = get_upload_hash_path(job_id)
     if hash_path.exists():
         file_hash = hash_path.read_text(encoding="utf-8").strip()
-        existing_job_id = find_job_id_by_hash(file_hash)
+        try:
+            existing_job_id = await asyncio.to_thread(find_job_id_by_hash, file_hash)
+        except Exception as exc:
+            logger.warning(
+                "Dedup hash scan failed for sha256=%s: %s. Continuing with new job=%s",
+                file_hash[:12],
+                exc,
+                job_id,
+            )
+            existing_job_id = None
 
         if existing_job_id and existing_job_id != job_id:
-            if _is_cached_result_valid(existing_job_id):
-                # Cache is fresh — reuse it
-                cleanup_job_files(job_id)
-                logger.info(
-                    f"Dedup hit | new_job={job_id} reuses cached={existing_job_id} | sha256={file_hash[:12]}..."
-                )
-                return UploadResponse(
-                    job_id=existing_job_id,
-                    filename=file.filename or "unknown.pdf",
-                    size_bytes=size_bytes,
-                    message="Cached result found. Use job_id to retrieve /extract/{job_id}.",
-                )
-            else:
-                # Cache expired — clean up the old result and process fresh
+            try:
+                if _is_cached_result_valid(existing_job_id):
+                    cleanup_job_files(job_id)
+                    logger.info(
+                        f"Dedup hit | new_job={job_id} reuses cached={existing_job_id} | sha256={file_hash[:12]}..."
+                    )
+                    return UploadResponse(
+                        job_id=existing_job_id,
+                        filename=file.filename or "unknown.pdf",
+                        size_bytes=size_bytes,
+                        message="Cached result found. Use job_id to retrieve /extract/{job_id}.",
+                    )
+
                 cleanup_job_files(existing_job_id)
                 logger.info(
-                    f"Dedup cache expired for sha256={file_hash[:12]}... — reprocessing as job={job_id}"
+                    f"Dedup cache expired for sha256={file_hash[:12]}... - reprocessing as job={job_id}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Dedup validation failed for sha256=%s: %s. Continuing with new job=%s",
+                    file_hash[:12],
+                    exc,
+                    job_id,
                 )
 
     logger.info(

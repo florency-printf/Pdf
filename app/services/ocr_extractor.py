@@ -7,8 +7,8 @@ FIXES IN THIS VERSION:
            only, English OCR goes to PaddleOCR only.
   FIX B — PaddleOCR is pinned to settings.PADDLE_LANG so it never receives
            lang="gu".
-  FIX C — rendered pages are generated at a minimum of 300 DPI and kept as
-           PIL images before OCR.
+  FIX C — rendered pages respect the caller-provided DPI and kept as PIL
+           images before OCR.
   FIX D — _ocr_result_looks_good() confidence gate lowered 0.4 → 0.25.
   FIX E — shutdown_ocr_executor() is available for clean FastAPI shutdown.
   FIX F — _get_multiprocessing_context() exported for tests.
@@ -300,7 +300,6 @@ def _render_pages_with_fitz(
     dpi: int,
 ) -> List[Image.Image]:
     """Render PDF pages with PyMuPDF — faster than pdf2image for most PDFs."""
-    dpi = max(300, dpi)
     if pdf_bytes is not None:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     elif pdf_path is not None:
@@ -336,7 +335,6 @@ def _render_pages_for_ocr(
     dpi: int,
 ) -> List[Image.Image]:
     """Render pages with PyMuPDF first, falling back to pdf2image if needed."""
-    dpi = max(300, dpi)
     try:
         return _render_pages_with_fitz(
             pdf_path=pdf_path,
@@ -532,7 +530,7 @@ def ocr_single_page_image(
       - English  -> PaddleOCR only
     """
     warnings: List[str] = []
-    render_dpi = max(300, dpi or settings.OCR_DPI)
+    render_dpi = int(dpi or settings.OCR_DPI)
     resolved_language = _resolve_ocr_language(language)
 
     if resolved_language == "gujarati":
@@ -622,8 +620,8 @@ def ocr_single_page_image(
     # Return the better result between fast and heavy paths
     try:
         fast_score = (
-            len(fast_page.get("text", ""))
-            + float(fast_page.get("confidence", 0.0)) * 100.0
+            len(fast_page.get("text", "")) * 0.5
+            + float(fast_page.get("confidence", 0.0)) * 200.0
             if fast_page
             else -1
         )
@@ -631,8 +629,8 @@ def ocr_single_page_image(
         fast_score = -1
 
     heavy_score = (
-        len(heavy_page.get("text", ""))
-        + float(heavy_page.get("confidence", 0.0)) * 100.0
+        len(heavy_page.get("text", "")) * 0.5
+        + float(heavy_page.get("confidence", 0.0)) * 200.0
     )
 
     if fast_score >= heavy_score and fast_page and _ocr_result_looks_good(fast_page):
@@ -703,7 +701,7 @@ def extract_ocr_pdf(
     language: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Full OCR extraction pipeline using the PDF on disk."""
-    dpi = max(300, dpi or settings.OCR_DPI)
+    dpi = int(dpi or settings.OCR_DPI)
     resolved_language = _resolve_ocr_language(language)
     if resolved_language == "gujarati":
         logger.info(
@@ -802,7 +800,7 @@ def extract_ocr_pdf_from_bytes(
     language: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Bytes-based OCR pipeline to avoid repeated disk reads."""
-    dpi = max(300, dpi or settings.OCR_DPI)
+    dpi = int(dpi or settings.OCR_DPI)
     resolved_language = _resolve_ocr_language(language)
     if resolved_language == "gujarati":
         logger.info(
@@ -857,7 +855,7 @@ def extract_ocr_pdf_local(
     Local OCR path for process-pool chunk workers.
     Runs rendering + OCR sequentially to avoid nested process pools.
     """
-    dpi = max(300, dpi or settings.OCR_DPI)
+    dpi = int(dpi or settings.OCR_DPI)
     all_images = _render_pages_for_ocr(
         pdf_path=pdf_path, page_numbers=page_numbers, dpi=dpi
     )

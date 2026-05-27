@@ -62,15 +62,19 @@ def _get_celery_job_state(job_id: str):
 
         if state == "PENDING":
             return STATE_PENDING, 0.0, "Queued, waiting for worker."
-        elif state == STATE_PROCESSING:
+        elif state in {"STARTED", STATE_PROCESSING, "processing"}:
             meta = result.info or {}
-            return STATE_PROCESSING, meta.get("progress", 0.0), meta.get("message", "")
+            return (
+                STATE_PROCESSING,
+                meta.get("progress", 0.0),
+                meta.get("message", "Processing..."),
+            )
         elif state == "SUCCESS":
             return STATE_DONE, 100.0, "Complete."
-        elif state == "FAILURE":
+        elif state in {"FAILURE", "REVOKED"}:
             return STATE_FAILED, 0.0, str(result.info)
         else:
-            return state.lower(), 0.0, ""
+            return STATE_PROCESSING, 0.0, f"State: {state}"
 
     except Exception as exc:
         logger.debug(f"Celery state check failed: {exc}")

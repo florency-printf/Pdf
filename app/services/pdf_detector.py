@@ -121,21 +121,17 @@ def _compute_text_coverage(page: fitz.Page) -> float:
     if page_area == 0:
         return 0.0
 
-    union_rect = None
     try:
         blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
     except Exception:
         return 0.0
+    total_text_area = 0.0
     for block in blocks:
         if block.get("type") == 0:  # text block
             r = fitz.Rect(block["bbox"])
-            union_rect = r if union_rect is None else (union_rect | r)
+            total_text_area += r.width * r.height
 
-    if union_rect is None:
-        return 0.0
-
-    text_area = union_rect.width * union_rect.height
-    return min(text_area / page_area, 1.0)
+    return min(total_text_area / page_area, 1.0)
 
 
 def _contains_gujarati_script(text: str) -> bool:
@@ -197,8 +193,9 @@ def classify_page(
     is_digital = (char_count >= 20 and text_coverage > 0.005) or (
         text_coverage > settings.DIGITAL_TEXT_THRESHOLD
     )
-    if gujarati_hint and (char_count >= 5 or text_coverage > 0.002):
-        is_digital = True
+    if gujarati_hint:
+        # Gujarati script hints should not override sparse/watermark-like text.
+        is_digital = char_count >= 20 and text_coverage > 0.005
 
     pdf_type = PDF_TYPE_DIGITAL if is_digital else PDF_TYPE_SCANNED
 
